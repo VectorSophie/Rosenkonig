@@ -12,17 +12,15 @@ from pydantic import BaseModel
 from ..engine.board import (
     BOARD_SIZE,
     BoardState,
+    Move,
     PlayerColor,
-    PowerCard,
     create_initial_state,
-    default_power_cards,
-    opponent,
+    official_power_deck,
 )
-from ..engine.logic import apply_move, calculate_scores, list_legal_moves
+from ..engine.logic import apply_move, calculate_scores, get_legal_moves
 
 
 HAND_SIZE = 5
-DECK_COPIES = 2
 
 
 class RoomInfo(BaseModel):
@@ -42,38 +40,44 @@ class GameEngine:
     Deck/hand management is kept in-memory here to match `docs/PROTOCOL.md`.
     """
 
-    def __init__(self) -> None:
-        # Start with empty hands; we deal when a player joins.
-        self.state: BoardState = create_initial_state(
-            red_power_cards=[],
-            white_power_cards=[],
-        )
-
-        deck: list[PowerCard] = []
-        for _ in range(DECK_COPIES):
-            deck.extend(default_power_cards())
-        random.shuffle(deck)
-        self._draw_pile: list[PowerCard] = deck
+    def __init__(self, *, seed: int | None = None) -> None:
+        # Source: https://www.thamesandkosmos.com/manuals/full/691790_theroseking_manual.pdf
+        # "Shuffle the power cards well ... Place the rest ... as the draw pile."
+        # Implementation: Initialize a single shuffled finite draw pile; no discard reshuffle rule is specified, so none is performed.
+        rng = random.Random(seed)
+        deck = official_power_deck()
+        rng.shuffle(deck)
+        self.state: BoardState = create_initial_state(shuffled_deck=deck)
 
     def ensure_hand(self, player: PlayerColor) -> None:
+        # Source: https://www.thamesandkosmos.com/manuals/full/691790_theroseking_manual.pdf
+        # "Shuffle the power cards ... distribute five to each player."
+        # Implementation: Deal up to 5 cards from finite shuffled draw pile.
         hand = self.state.players[player].power_cards
-        while len(hand) < HAND_SIZE and self._draw_pile:
-            hand.append(self._draw_pile.pop())
+        while len(hand) < HAND_SIZE and self.state.draw_pile:
+            hand.append(self.state.draw_pile.pop())
 
     def _can_draw(self, player: PlayerColor) -> bool:
         hand = self.state.players[player].power_cards
-        return len(hand) < HAND_SIZE and bool(self._draw_pile)
+        return len(hand) < HAND_SIZE and bool(self.state.draw_pile)
 
     def _has_legal_move(self, player: PlayerColor) -> bool:
         probe = self.state.copy()
         probe.current_player = player
-        return bool(list_legal_moves(probe))
+        return bool(
+            [entry for entry in get_legal_moves(probe) if entry.move.action == "play"]
+        )
+
+    def _advance_forced_passes(self) -> None:
+        while not self.state.game_over:
+            legal = get_legal_moves(self.state)
+            if len(legal) == 1 and legal[0].move.action == "pass":
+                self.state = apply_move(self.state, legal[0].move)
+                continue
+            break
 
     def refresh_game_over(self) -> None:
-        player = self.state.current_player
-        self.state.game_over = not (
-            self._has_legal_move(player) or self._can_draw(player)
-        )
+        self._advance_forced_passes()
 
     def draw_card(self, *, player: PlayerColor) -> None:
         if self.state.game_over:
@@ -84,11 +88,9 @@ class GameEngine:
         hand = self.state.players[player].power_cards
         if len(hand) >= HAND_SIZE:
             raise ValueError("hand is already full")
-        if not self._draw_pile:
+        if not self.state.draw_pile:
             raise ValueError("draw pile is empty")
-
-        hand.append(self._draw_pile.pop())
-        self.state.current_player = opponent(player)
+        self.state = apply_move(self.state, Move(action="draw"))
         self.refresh_game_over()
 
     def make_move(
@@ -103,16 +105,17 @@ class GameEngine:
         if card_index < 0 or card_index >= len(resources.power_cards):
             raise ValueError("invalid card_index")
 
-        card = resources.power_cards[card_index]
-        # Engine uses "hero" terminology; protocol uses "knight".
-        next_state = apply_move(state=self.state, card=card, use_hero=use_knight)
-        self.state = next_state
+        self.state = apply_move(
+            self.state,
+            Move(action="play", card_index=card_index, use_hero=use_knight),
+        )
         self.refresh_game_over()
 
     def to_public_payload(
         self, *, players: dict[PlayerColor, str]
     ) -> dict[str, object]:
         scores = calculate_scores(self.state)
+        legal_moves = get_legal_moves(self.state)
 
         flat_board: list[int] = []
         for row in range(BOARD_SIZE):
@@ -146,6 +149,18 @@ class GameEngine:
             ],
             "current_turn": current_name,
             "game_over": bool(self.state.game_over),
+            "legal_moves": [
+                {
+                    "action": entry.move.action,
+                    "card_index": entry.move.card_index,
+                    "use_hero": entry.move.use_hero,
+                    "target": [entry.target[1], entry.target[0]]
+                    if entry.target is not None
+                    else None,
+                }
+                for entry in legal_moves
+            ],
+            "move_history": [entry.copy() for entry in self.state.move_history],
         }
 
 

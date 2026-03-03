@@ -9,9 +9,15 @@ export type PowerCard = {
 };
 
 export type LegalMove = {
+  action: string;
   card_index: number;
-  card: PowerCard;
-  target: [number, number];
+  target: [number, number] | null;
+  use_hero: boolean;
+};
+
+export type LoggedMove = {
+  action: string;
+  card_index: number | null;
   use_hero: boolean;
 };
 
@@ -31,6 +37,7 @@ export type GameState = {
   current_turn: PlayerColor;
   game_over: boolean;
   legal_moves: LegalMove[];
+  move_history: LoggedMove[];
 };
 
 type ServerPlayer = {
@@ -46,6 +53,13 @@ type ServerStatePayload = {
   players: ServerPlayer[];
   current_turn: string;
   game_over: boolean;
+  legal_moves?: Array<{
+    action: string;
+    card_index: number;
+    target: [number, number] | null;
+    use_hero: boolean;
+  }>;
+  move_history?: LoggedMove[];
 };
 
 type SocketEnvelope = { type: string; payload: any };
@@ -61,6 +75,7 @@ type GameStoreState = {
   player_color: PlayerColor | null;
   last_error: string | null;
   state: GameState | null;
+  state_history: GameState[];
 };
 
 function toBoardMatrix(input: number[] | number[][]): number[][] {
@@ -112,6 +127,13 @@ function normalizeStatePayload(
     players.find((p) => p.name.toLowerCase() === localPlayerName.trim().toLowerCase())?.color ??
     null;
 
+  const legal_moves = (payload.legal_moves ?? []).map((m) => ({
+    action: m.action,
+    card_index: m.card_index,
+    use_hero: m.use_hero,
+    target: m.target ? [m.target[1], m.target[0]] : null
+  })) as LegalMove[];
+
   return {
     state: {
       room_id: roomId,
@@ -120,7 +142,8 @@ function normalizeStatePayload(
       players,
       current_turn,
       game_over: Boolean(payload.game_over),
-      legal_moves: []
+      legal_moves,
+      move_history: payload.move_history ?? []
     },
     playerColor: inferredColor
   };
@@ -142,7 +165,8 @@ function createGameStore() {
     player_name: 'Player',
     player_color: null,
     last_error: null,
-    state: null
+    state: null,
+    state_history: []
   };
 
   const { subscribe, update, set } = writable<GameStoreState>(initial);
@@ -257,9 +281,18 @@ function createGameStore() {
               s.player_name,
               s.player_color
             );
+            const nextState = normalized.state;
+            const previous = s.state;
+            const changed =
+              !previous ||
+              JSON.stringify(previous.board) !== JSON.stringify(nextState.board) ||
+              previous.current_turn !== nextState.current_turn ||
+              previous.game_over !== nextState.game_over;
+            const nextHistory = changed ? [...s.state_history, nextState] : s.state_history;
             return {
               ...s,
-              state: normalized.state,
+              state: nextState,
+              state_history: nextHistory,
               player_color: normalized.playerColor,
               last_error: null
             };
@@ -338,7 +371,8 @@ function createGameStore() {
     drawCard,
     disconnect,
     you,
-    opponent
+    opponent,
+    stateHistory: derived({ subscribe }, ($s) => $s.state_history)
   };
 }
 

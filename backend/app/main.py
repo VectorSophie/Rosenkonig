@@ -32,6 +32,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .api.rooms import router as rooms_router
+from .api.analysis import router as analysis_router
 from .api.websocket import router as websocket_router
 
 
@@ -63,6 +64,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(rooms_router)
+    app.include_router(analysis_router)
     app.include_router(websocket_router)
 
     @app.get("/health")

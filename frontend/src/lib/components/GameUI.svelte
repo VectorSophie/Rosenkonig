@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { onDestroy, onMount } from 'svelte';
   import { game, type LegalMove, type PlayerView, type RoomMode } from '$lib/stores/game';
   import Board from '$lib/components/Board.svelte';
@@ -43,6 +44,8 @@
   let keybinds: Keybinds = { ...DEFAULT_KEYBINDS };
   let keybindSettingsOpen = false;
   let hasLoadedKeybinds = false;
+  export let routeGameId: string | null = null;
+  let attemptedRouteJoin = false;
 
   $: state = $game?.state ?? null;
   $: you =
@@ -63,6 +66,7 @@
     !hasServerLegalMoves || selectedCardIndex === null
       ? null
       : legalMoves.find((m) => m.card_index === selectedCardIndex && m.use_hero === useHero) ?? null;
+  $: selectedCard = selectedCardIndex === null ? null : (you?.power_cards?.[selectedCardIndex] ?? null);
   $: altMove =
     !hasServerLegalMoves || selectedCardIndex === null
       ? null
@@ -308,7 +312,7 @@
   function onBoardCell(e: CustomEvent<{ row: number; col: number }>) {
     if (!myTurn) return;
     if (hasServerLegalMoves) {
-      if (!selectedMove) return;
+      if (!selectedMove || !selectedMove.target) return;
       if (selectedMove.target[0] !== e.detail.row || selectedMove.target[1] !== e.detail.col) return;
       game.makeMove({ card_index: selectedMove.card_index, use_knight: selectedMove.use_hero });
     } else {
@@ -348,12 +352,18 @@
     selectedCardIndex = null;
     useHero = false;
     await game.createRoom({ player_name: name, mode });
+    const createdId = $game?.room_id;
+    if (createdId) {
+      await goto(`/games/${encodeURIComponent(createdId)}`);
+    }
   }
 
   async function join() {
     selectedCardIndex = null;
     useHero = false;
-    await game.joinRoom({ room_id: roomId.trim(), player_name: name });
+    const targetRoom = roomId.trim();
+    await game.joinRoom({ room_id: targetRoom, player_name: name });
+    await goto(`/games/${encodeURIComponent(targetRoom)}`);
   }
 
   async function copyRoom() {
@@ -363,6 +373,21 @@
       await navigator.clipboard.writeText(id);
     } catch {
     }
+  }
+
+  async function joinRouteRoomIfNeeded() {
+    if (!routeGameId || attemptedRouteJoin) return;
+    const trimmed = routeGameId.trim();
+    if (!trimmed) return;
+    attemptedRouteJoin = true;
+    roomId = trimmed;
+    const currentRoom = $game?.room_id;
+    if (currentRoom === trimmed && $game?.status === 'connected') return;
+    await game.joinRoom({ room_id: trimmed, player_name: name });
+  }
+
+  $: if (routeGameId) {
+    void joinRouteRoomIfNeeded();
   }
 </script>
 
@@ -474,12 +499,17 @@
           {#if !state}
             <div class="muted">Create or join a room to start.</div>
           {:else if state.game_over}
-            <div class="end">{winnerLabel(state.players) ?? 'Game over'}</div>
+            <div class="end">
+              <span>{winnerLabel(state.players) ?? 'Game over'}</span>
+              {#if $game?.room_id}
+                <a class="btn" href={`/games/${encodeURIComponent($game.room_id)}/analyze`}>Open analysis</a>
+              {/if}
+            </div>
           {:else}
             <div class={['turn', myTurn ? 'my' : 'their'].join(' ')}>
               <span>{myTurn ? 'Your turn' : `${state.current_turn.toUpperCase()} to move`}</span>
               {#if selectedMove}
-                <span class="muted">Selected: {cardLabel(selectedMove.card)} {selectedMove.use_hero ? '(Hero)' : ''}</span>
+                <span class="muted">Selected: {selectedCard ? cardLabel(selectedCard) : 'Card'} {selectedMove.use_hero ? '(Hero)' : ''}</span>
               {:else if selectedCardIndex !== null}
                 <span class="muted">Pick a highlighted square</span>
               {/if}
@@ -679,19 +709,24 @@
 
   .main {
     display: grid;
-    grid-template-columns: 1fr 360px;
+    grid-template-columns: minmax(0, 1fr) 360px;
     gap: 16px;
     align-items: start;
   }
 
+  .board-area {
+    min-width: 0;
+  }
+
   .board-panel {
     padding: 16px;
+    overflow: visible;
   }
 
   .arena {
     display: grid;
-    grid-template-columns: 112px minmax(0, 1fr) 112px;
-    gap: 12px;
+    grid-template-columns: 124px minmax(0, 1fr) 124px;
+    gap: 14px;
     align-items: center;
   }
 
@@ -699,6 +734,18 @@
     display: grid;
     justify-items: center;
     gap: 10px;
+    min-width: 0;
+    position: relative;
+    z-index: 2;
+  }
+
+  .board-frame :global(.board-wrap) {
+    width: min(100%, 720px) !important;
+    max-width: 100%;
+  }
+
+  .side {
+    min-width: 0;
   }
 
   .deck-zone {
@@ -766,6 +813,17 @@
     grid-template-rows: auto 1fr;
     padding: 10px 8px;
     gap: 10px;
+    overflow: hidden;
+    position: relative;
+    z-index: 1;
+  }
+
+  .hand-rail.opp {
+    padding-right: 14px;
+  }
+
+  .hand-rail.you {
+    padding-left: 14px;
   }
 
   .hand-rail.active {
@@ -1168,6 +1226,12 @@
     font-size: 11px;
     font-weight: 800;
     color: rgba(242, 193, 78, 0.95);
+  }
+
+  @media (max-width: 1220px) {
+    .main {
+      grid-template-columns: 1fr;
+    }
   }
 
   @media (max-width: 1000px) {

@@ -3,8 +3,8 @@ from __future__ import annotations
 import random
 from collections import deque
 
-from .board import BOARD_SIZE, BoardState, CellState, PlayerColor, PowerCard, opponent
-from .logic import apply_move, calculate_scores, list_legal_moves
+from .board import BOARD_SIZE, BoardState, CellState, Move, PlayerColor, opponent
+from .logic import apply_move, calculate_scores, get_legal_moves
 
 
 def _largest_group_size(grid: list[list[int]], cell: CellState) -> int:
@@ -83,10 +83,9 @@ def evaluate_state(state: BoardState, player: PlayerColor) -> float:
         _center_control(state.grid, my_cell, opp_cell) if total_pieces < 20 else 0
     )
 
-    # Mobility: number of legal moves for the opponent.
     opp_turn: BoardState = state.copy()
     opp_turn.current_player = opp
-    opp_mobility = len(list_legal_moves(opp_turn))
+    opp_mobility = len(get_legal_moves(opp_turn))
 
     return (
         (score_diff * 1.0)
@@ -96,26 +95,28 @@ def evaluate_state(state: BoardState, player: PlayerColor) -> float:
     )
 
 
-def choose_ai_move(state: BoardState) -> tuple[PowerCard, bool] | None:
+def choose_ai_move(state: BoardState) -> Move | None:
     """Pick a move for the *current* player using a 1-ply heuristic."""
-    legal = list_legal_moves(state)
+    legal = get_legal_moves(state)
     if not legal:
         return None
 
     player = state.current_player
     best_score = float("-inf")
-    best: list[tuple[PowerCard, bool]] = []
+    best: list[Move] = []
 
-    for move in legal:
+    for legal_move in legal:
+        if legal_move.move.action != "play":
+            continue
         try:
-            next_state = apply_move(state=state, card=move.card, use_hero=move.use_hero)
+            next_state = apply_move(state=state, move=legal_move.move)
         except Exception:
             continue
         score = evaluate_state(next_state, player)
         if score > best_score:
             best_score = score
-            best = [(move.card, move.use_hero)]
+            best = [legal_move.move]
         elif score == best_score:
-            best.append((move.card, move.use_hero))
+            best.append(legal_move.move)
 
     return random.choice(best) if best else None

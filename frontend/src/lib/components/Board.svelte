@@ -47,19 +47,21 @@
   $: {
     allTargets.clear();
     for (const m of legalMoves) {
+      if (!m.target) continue;
       allTargets.set(keyOf(m.target[0], m.target[1]) + `|${m.card_index}|${m.use_hero ? 1 : 0}`, m);
     }
   }
 
-  $: selectedTargetKey = selectedMove ? keyOf(selectedMove.target[0], selectedMove.target[1]) : null;
+  $: selectedTargetKey = selectedMove?.target ? keyOf(selectedMove.target[0], selectedMove.target[1]) : null;
 
   function isSelectableTarget(r: number, c: number) {
-    if (!selectedMove) return false;
+    if (!selectedMove?.target) return false;
     return selectedMove.target[0] === r && selectedMove.target[1] === c;
   }
 
   function isAnyLegalTarget(r: number, c: number) {
     for (const m of legalMoves) {
+      if (!m.target) continue;
       if (m.target[0] === r && m.target[1] === c) return true;
     }
     return false;

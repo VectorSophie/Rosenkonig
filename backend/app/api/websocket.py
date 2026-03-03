@@ -58,15 +58,13 @@ async def _ai_step(room: Room) -> None:
         async with room.lock:
             move = choose_ai_move(room.engine.state)
             if move:
-                card, use_knight = move
                 try:
-                    # Find index of the card in hand.
-                    hand = room.engine.state.players[PlayerColor.WHITE].power_cards
-                    idx = hand.index(card)
                     room.engine.make_move(
                         player=PlayerColor.WHITE,
-                        card_index=idx,
-                        use_knight=use_knight,
+                        card_index=move.card_index
+                        if move.card_index is not None
+                        else -1,
+                        use_knight=move.use_hero,
                     )
                 except (ValueError, IndexError):
                     # AI couldn't move, maybe draw?
@@ -171,7 +169,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                 await _broadcast_state(room)
                 if room.players.get(PlayerColor.WHITE) == "AI":
-                    asyncio.create_task(_ai_step(room))
+                    _ = asyncio.create_task(_ai_step(room))
                 continue
 
             # All other messages require being in a room.
@@ -202,7 +200,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                 await _broadcast_state(room)
                 if room.players.get(PlayerColor.WHITE) == "AI":
-                    asyncio.create_task(_ai_step(room))
+                    _ = asyncio.create_task(_ai_step(room))
                 continue
 
             if msg_type_norm in {"DRAW_CARD", "DRAWCARD"}:
@@ -215,7 +213,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 
                 await _broadcast_state(room)
                 if room.players.get(PlayerColor.WHITE) == "AI":
-                    asyncio.create_task(_ai_step(room))
+                    _ = asyncio.create_task(_ai_step(room))
                 continue
 
             if msg_type_norm in {
