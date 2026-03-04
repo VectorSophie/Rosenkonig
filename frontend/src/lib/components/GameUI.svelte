@@ -141,12 +141,10 @@
   }
 
   function swordBladeLength(distance: number): number {
-    const normalized = Number.isFinite(distance) ? Math.round(distance) : 1;
+    const numericDistance = Number(distance);
+    const normalized = Number.isFinite(numericDistance) ? Math.round(numericDistance) : 1;
     const clamped = Math.max(1, Math.min(8, normalized));
-    if (clamped === 1) return 8;
-    if (clamped === 2) return 18;
-    if (clamped === 3) return 30;
-    return 30 + (clamped - 3) * 8;
+    return clamped * 7;
   }
 
   function directionDelta(direction: string): [number, number] {
@@ -1163,7 +1161,6 @@
     justify-items: center;
     gap: 12px;
     padding-top: 14px;
-    --blade-len: 7px;
   }
 
   .crown-meter {
@@ -1220,7 +1217,7 @@
     position: absolute;
     left: 5px;
     top: -3px;
-    width: var(--blade-len);
+    width: var(--blade-len, 7px);
     height: 6px;
     background: linear-gradient(180deg, rgba(247, 251, 255, 0.98), rgba(210, 226, 248, 0.95));
     border-top: 1px solid rgba(255, 255, 255, 0.85);
@@ -1230,13 +1227,13 @@
 
   .sword-meter .tip {
     position: absolute;
-    left: calc(5px + var(--blade-len));
+    left: calc(5px + var(--blade-len, 7px));
     top: -4px;
     width: 0;
     height: 0;
     border-top: 4px solid transparent;
     border-bottom: 4px solid transparent;
-    border-left: calc(5px + var(--blade-len) * 0.28) solid rgba(228, 240, 255, 0.98);
+    border-left: calc(5px + var(--blade-len, 7px) * 0.28) solid rgba(228, 240, 255, 0.98);
   }
 
   .hand-rail {
