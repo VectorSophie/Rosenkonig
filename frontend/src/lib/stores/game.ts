@@ -2,6 +2,7 @@ import { derived, get, writable } from 'svelte/store';
 
 export type RoomMode = 'single' | 'multi';
 export type PlayerColor = 'red' | 'white';
+export type ColorPreference = 'random' | PlayerColor;
 
 export type PowerCard = {
   direction: string;
@@ -33,6 +34,7 @@ export type GameState = {
   room_id: string;
   board: number[][];
   crown_pos: [number, number];
+  draw_pile_count: number;
   players: PlayerView[];
   current_turn: PlayerColor;
   game_over: boolean;
@@ -50,6 +52,7 @@ type ServerPlayer = {
 type ServerStatePayload = {
   board: number[] | number[][];
   crown_pos: [number, number];
+  draw_pile_count?: number;
   players: ServerPlayer[];
   current_turn: string;
   game_over: boolean;
@@ -73,6 +76,7 @@ type GameStoreState = {
   mode: RoomMode | null;
   player_name: string;
   player_color: PlayerColor | null;
+  is_spectator: boolean;
   last_error: string | null;
   state: GameState | null;
   state_history: GameState[];
@@ -139,6 +143,7 @@ function normalizeStatePayload(
       room_id: roomId,
       board: toBoardMatrix(payload.board),
       crown_pos: [payload.crown_pos?.[1] ?? 5, payload.crown_pos?.[0] ?? 5],
+      draw_pile_count: payload.draw_pile_count ?? 0,
       players,
       current_turn,
       game_over: Boolean(payload.game_over),
@@ -164,6 +169,7 @@ function createGameStore() {
     mode: null,
     player_name: 'Player',
     player_color: null,
+    is_spectator: false,
     last_error: null,
     state: null,
     state_history: []
@@ -199,7 +205,11 @@ function createGameStore() {
         if (s.room_id) {
           send({
             type: 'JOIN_ROOM',
-            payload: { room_id: s.room_id, player_name: s.player_name }
+            payload: {
+              room_id: s.room_id,
+              player_name: s.player_name,
+              spectator: s.is_spectator,
+            }
           });
         }
       });
@@ -263,10 +273,12 @@ function createGameStore() {
         }
 
         if (msg.type === 'ROOM_CREATED' || msg.type === 'ROOM_JOINED') {
+          const hasPlayerColor = Object.prototype.hasOwnProperty.call(msg.payload ?? {}, 'player_color');
           update((s) => ({
             ...s,
             room_id: msg.payload.room_id ?? s.room_id,
-            player_color: msg.payload.player_color ?? s.player_color,
+            player_color: hasPlayerColor ? (msg.payload.player_color as PlayerColor | null) : s.player_color,
+            is_spectator: Boolean(msg.payload.spectator),
             mode: msg.payload.mode ?? s.mode,
             last_error: null
           }));
@@ -293,7 +305,7 @@ function createGameStore() {
               ...s,
               state: nextState,
               state_history: nextHistory,
-              player_color: normalized.playerColor,
+              player_color: s.is_spectator ? null : normalized.playerColor,
               last_error: null
             };
           });
@@ -312,19 +324,36 @@ function createGameStore() {
     });
   }
 
-  async function createRoom(opts: { player_name: string; mode: RoomMode }) {
+  async function createRoom(opts: {
+    player_name: string;
+    mode: RoomMode;
+    color_preference?: ColorPreference;
+  }) {
     const playerName = opts.player_name?.trim() || 'Player';
     const roomId = makeRoomId(opts.mode);
+    const colorPreference = opts.color_preference ?? 'random';
     update((s) => ({ ...s, room_id: roomId, player_name: playerName, mode: opts.mode }));
     await connect();
-    send({ type: 'JOIN_ROOM', payload: { room_id: roomId, player_name: playerName } });
+    send({
+      type: 'JOIN_ROOM',
+      payload: {
+        room_id: roomId,
+        player_name: playerName,
+        player_color: colorPreference,
+        spectator: false,
+      },
+    });
   }
 
-  async function joinRoom(opts: { room_id: string; player_name: string }) {
+  async function joinRoom(opts: { room_id: string; player_name: string; spectator?: boolean }) {
     const playerName = opts.player_name?.trim() || 'Player';
-    update((s) => ({ ...s, room_id: opts.room_id, player_name: playerName }));
+    const joinAsSpectator = Boolean(opts.spectator);
+    update((s) => ({ ...s, room_id: opts.room_id, player_name: playerName, is_spectator: joinAsSpectator }));
     await connect();
-    send({ type: 'JOIN_ROOM', payload: { room_id: opts.room_id, player_name: playerName } });
+    send({
+      type: 'JOIN_ROOM',
+      payload: { room_id: opts.room_id, player_name: playerName, spectator: joinAsSpectator },
+    });
   }
 
   function makeMove(opts: { card_index: number; use_knight: boolean }) {

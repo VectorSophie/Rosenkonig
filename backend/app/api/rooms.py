@@ -59,7 +59,9 @@ class GameEngine:
 
     def _can_draw(self, player: PlayerColor) -> bool:
         hand = self.state.players[player].power_cards
-        return len(hand) < HAND_SIZE and bool(self.state.draw_pile)
+        return len(hand) < HAND_SIZE and bool(
+            self.state.draw_pile or self.state.discard_pile
+        )
 
     def _has_legal_move(self, player: PlayerColor) -> bool:
         probe = self.state.copy()
@@ -68,16 +70,8 @@ class GameEngine:
             [entry for entry in get_legal_moves(probe) if entry.move.action == "play"]
         )
 
-    def _advance_forced_passes(self) -> None:
-        while not self.state.game_over:
-            legal = get_legal_moves(self.state)
-            if len(legal) == 1 and legal[0].move.action == "pass":
-                self.state = apply_move(self.state, legal[0].move)
-                continue
-            break
-
     def refresh_game_over(self) -> None:
-        self._advance_forced_passes()
+        _ = self.state
 
     def draw_card(self, *, player: PlayerColor) -> None:
         if self.state.game_over:
@@ -88,7 +82,7 @@ class GameEngine:
         hand = self.state.players[player].power_cards
         if len(hand) >= HAND_SIZE:
             raise ValueError("hand is already full")
-        if not self.state.draw_pile:
+        if not (self.state.draw_pile or self.state.discard_pile):
             raise ValueError("draw pile is empty")
         self.state = apply_move(self.state, Move(action="draw"))
         self.refresh_game_over()
@@ -143,6 +137,7 @@ class GameEngine:
         return {
             "board": flat_board,
             "crown_pos": [int(king_col), int(king_row)],
+            "draw_pile_count": len(self.state.draw_pile),
             "players": [
                 _player_payload(PlayerColor.RED),
                 _player_payload(PlayerColor.WHITE),
@@ -177,6 +172,7 @@ class Room:
 
     # Connected websockets (for broadcast).
     connections: set[WebSocket] = field(default_factory=set)
+    spectator_names: set[str] = field(default_factory=set)
 
 
 class RoomManager:
@@ -213,10 +209,21 @@ class RoomManager:
         async with self._lock:
             return list(self._rooms.values())
 
-    def assign_player(self, room: Room, *, player_name: str) -> PlayerColor:
+    def assign_player(
+        self,
+        room: Room,
+        *,
+        player_name: str,
+        preferred_color: PlayerColor | None = None,
+    ) -> PlayerColor:
         normalized = player_name.strip() or "Player"
         if normalized in room.name_to_color:
             return room.name_to_color[normalized]
+
+        if preferred_color is not None and preferred_color not in room.players:
+            room.players[preferred_color] = normalized
+            room.name_to_color[normalized] = preferred_color
+            return preferred_color
 
         if PlayerColor.RED not in room.players:
             room.players[PlayerColor.RED] = normalized

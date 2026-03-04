@@ -28,6 +28,27 @@
     best_score: number;
     classification: string;
     best_line: Array<{ action: string; card_index: number | null; use_hero: boolean }>;
+    chosen_explanation?: MoveExplanation | null;
+    best_move_explanation?: MoveExplanation | null;
+    blunder_explanation?: string | null;
+  };
+
+  type EvalBreakdown = {
+    total: number;
+    region_score_diff: number;
+    expansion_score: number;
+    mobility_score: number;
+    crown_centrality: number;
+    hero_threat_adjustment: number;
+    stone_scarcity_pressure: number;
+  };
+
+  type MoveExplanation = {
+    summary: string;
+    key_factors: string[];
+    principal_variation: Array<{ action: string; card_index: number | null; use_hero: boolean }>;
+    risk_level: 'low' | 'medium' | 'high';
+    robustness_score: number;
   };
 
   type AnalysisResponse = {
@@ -58,6 +79,9 @@
     principal_variation: Array<{ action: string; card_index: number | null; use_hero: boolean }>;
     move_evaluations: Record<string, number>;
     move_classifications: Record<string, string>;
+    move_explanations: Record<string, MoveExplanation>;
+    evaluation_breakdowns: Record<string, EvalBreakdown>;
+    root_evaluation: EvalBreakdown;
     diagnostics: Record<string, unknown>;
   };
 
@@ -99,14 +123,14 @@
   $: reportInitial = report?.initial_position
     ? {
         board: report.initial_position.board,
-        crown_pos: report.initial_position.crown_pos,
+        crown_pos: [report.initial_position.crown_pos[1], report.initial_position.crown_pos[0]] as [number, number],
         legal_moves: []
       }
     : null;
 
   $: reportSnapshots = (report?.positions ?? []).map((p) => ({
     board: p.board,
-    crown_pos: p.crown_pos,
+    crown_pos: [p.crown_pos[1], p.crown_pos[0]] as [number, number],
     legal_moves: []
   })) as BoardSnapshot[];
 
@@ -116,7 +140,16 @@
       ? baselineState
       : reportSnapshots[selectedMoveIndex] ?? stateHistory[selectedMoveIndex] ?? baselineState;
   $: selectedMove = selectedMoveIndex >= 0 ? report?.moves?.[selectedMoveIndex] ?? null : null;
-  $: selectedPv = selectedMove ? selectedMove.best_line : bestMoveResult?.principal_variation ?? [];
+  $: chosenExplanation = selectedMove?.chosen_explanation ?? null;
+  $: bestAlternativeExplanation = selectedMove?.best_move_explanation ?? null;
+  $: selectedExplanation = selectedMove
+    ? chosenExplanation ?? bestAlternativeExplanation ?? null
+    : bestMoveResult && bestMoveResult.best_move
+      ? bestMoveResult.move_explanations?.[
+          `${bestMoveResult.best_move.action}:${bestMoveResult.best_move.card_index}:${bestMoveResult.best_move.use_hero ? 1 : 0}`
+        ] ?? null
+      : null;
+  $: selectedPv = selectedExplanation?.principal_variation ?? (selectedMove ? selectedMove.best_line : bestMoveResult?.principal_variation ?? []);
 
   $: firstPvMove = selectedPv.length > 0 ? selectedPv[0] : null;
   $: firstMoveTarget =
@@ -132,6 +165,13 @@
   $: evalValue = selectedMove
     ? selectedMove.chosen_score
     : bestMoveResult?.expected_score ?? (timeline.length ? timeline[timeline.length - 1] : 0);
+  $: previousSnapshot =
+    selectedMoveIndex <= 0
+      ? baselineState
+      : reportSnapshots[selectedMoveIndex - 1] ?? stateHistory[selectedMoveIndex - 1] ?? baselineState;
+  $: affectedSquares = deriveAffectedSquares(previousSnapshot, selectedSnapshot);
+  $: scoreSwing = selectedMove ? Math.abs(selectedMove.best_score - selectedMove.chosen_score) : 0;
+  $: scoreSwingPercent = Math.max(0, Math.min(100, (scoreSwing / 3) * 100));
 
   function clampEval(v: number): number {
     return Math.max(-20, Math.min(20, v));
@@ -166,6 +206,78 @@
     return `${m.use_hero ? 'H-' : ''}C${idx}`;
   }
 
+  function riskBadgeClass(risk: 'low' | 'medium' | 'high'): string {
+    if (risk === 'low') return 'risk-low';
+    if (risk === 'high') return 'risk-high';
+    return 'risk-medium';
+  }
+
+  function sameCell(a: [number, number], b: [number, number]): boolean {
+    return a[0] === b[0] && a[1] === b[1];
+  }
+
+  function keyOf(r: number, c: number): string {
+    return `${r},${c}`;
+  }
+
+  function deriveAffectedSquares(
+    before: BoardSnapshot | null,
+    after: BoardSnapshot | null
+  ): Array<[number, number]> {
+    if (!before || !after) return [];
+    const changed: Array<[number, number]> = [];
+    const changedKeys = new Set<string>();
+    for (let r = 0; r < 11; r += 1) {
+      for (let c = 0; c < 11; c += 1) {
+        if ((before.board?.[r]?.[c] ?? 0) !== (after.board?.[r]?.[c] ?? 0)) {
+          changed.push([r, c]);
+          changedKeys.add(keyOf(r, c));
+        }
+      }
+    }
+
+    if (!sameCell(before.crown_pos, after.crown_pos)) {
+      changedKeys.add(keyOf(before.crown_pos[0], before.crown_pos[1]));
+      changedKeys.add(keyOf(after.crown_pos[0], after.crown_pos[1]));
+      changed.push(before.crown_pos);
+      changed.push(after.crown_pos);
+    }
+
+    const expandedKeys = new Set<string>(changedKeys);
+    for (const [r, c] of changed) {
+      const color = after.board?.[r]?.[c] ?? 0;
+      if (color === 0) continue;
+      const stack: Array<[number, number]> = [[r, c]];
+      const seen = new Set<string>();
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (!current) break;
+        const [rr, cc] = current;
+        const k = keyOf(rr, cc);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        if ((after.board?.[rr]?.[cc] ?? 0) !== color) continue;
+        expandedKeys.add(k);
+        for (const [dr, dc] of [
+          [-1, 0],
+          [1, 0],
+          [0, -1],
+          [0, 1]
+        ]) {
+          const nr = rr + dr;
+          const nc = cc + dc;
+          if (nr < 0 || nr >= 11 || nc < 0 || nc >= 11) continue;
+          stack.push([nr, nc]);
+        }
+      }
+    }
+
+    return Array.from(expandedKeys).map((entry) => {
+      const [r, c] = entry.split(',').map(Number);
+      return [r, c] as [number, number];
+    });
+  }
+
   async function loadConfig() {
     try {
       const res = await fetch(`${BACKEND_HTTP}/engine-config`);
@@ -183,6 +295,7 @@
       const payload = (await res.json()) as {
         board: number[];
         crown_pos: [number, number];
+        draw_pile_count?: number;
         players: Array<{ name: string; hand: Array<{ direction: string; distance: number }>; knights: number; score: number }>;
         current_turn: string;
         game_over: boolean;
@@ -215,6 +328,7 @@
         room_id: roomId,
         board,
         crown_pos: [payload.crown_pos[1], payload.crown_pos[0]],
+        draw_pile_count: payload.draw_pile_count ?? 0,
         players,
         current_turn: currentTurn,
         game_over: payload.game_over,
@@ -322,11 +436,19 @@
           crownPos={selectedSnapshot?.crown_pos ?? [5, 5]}
           previewPos={firstMoveTarget}
           legalMoves={selectedSnapshot?.legal_moves ?? []}
+          highlightedSquares={affectedSquares}
           selectedCardIndex={null}
           selectedUseHero={false}
           interactive={false}
         />
       </div>
+      {#if selectedMoveIndex >= 0}
+        <div class="swing-box">
+          <div class="section-title">Swing Magnitude</div>
+          <div class="muted tiny">Best - chosen: {scoreSwing.toFixed(2)}</div>
+          <div class="swing-track"><div class="swing-fill" style={`width:${scoreSwingPercent}%`}></div></div>
+        </div>
+      {/if}
       <div class="nav-row">
         <button class="btn ghost" on:click={goStart}>{'<<'}</button>
         <button class="btn ghost" on:click={goPrev}>{'<'}</button>
@@ -410,12 +532,53 @@
           <div class="muted tiny">Run game analysis to see classifications.</div>
         {:else}
           {#each report.moves as move, i}
-            <button class={['line', i === selectedMoveIndex ? 'active' : ''].join(' ')} on:click={() => (selectedMoveIndex = i)}>
+            <button
+              class={['line', i === selectedMoveIndex ? 'active' : ''].join(' ')}
+              on:click={() => (selectedMoveIndex = i)}
+              title={move.chosen_explanation?.summary ?? move.best_move_explanation?.summary ?? 'No explanation available'}
+            >
               <span class="idx">{move.ply}.</span>
               <span>{notation(move.chosen_move)}</span>
               <span class={['badge', badgeClass(move.classification)].join(' ')}>{move.classification}</span>
             </button>
           {/each}
+        {/if}
+      </div>
+
+      <div class="explain-box">
+        <div class="section-title">Move Reasoning</div>
+        {#if !selectedExplanation}
+          <div class="muted tiny">Select a move or run position analysis to view deterministic reasoning.</div>
+        {:else}
+          <div class="summary">{selectedExplanation.summary}</div>
+          <ul class="factors">
+            {#each selectedExplanation.key_factors.slice(0, 4) as factor}
+              <li>{factor}</li>
+            {/each}
+          </ul>
+          <div class="risk-row">
+            <span class="muted tiny">Risk</span>
+            <span class={['risk-pill', riskBadgeClass(selectedExplanation.risk_level)].join(' ')}>{selectedExplanation.risk_level}</span>
+          </div>
+          <div class="robustness">
+            <div class="muted tiny">Robustness {(selectedExplanation.robustness_score * 100).toFixed(0)}%</div>
+            <div class="bar"><div class="fill" style={`width:${Math.max(0, Math.min(100, selectedExplanation.robustness_score * 100))}%`}></div></div>
+          </div>
+          {#if selectedMove?.blunder_explanation}
+            <div class="blunder-note">{selectedMove.blunder_explanation}</div>
+          {/if}
+          {#if selectedMove && chosenExplanation && bestAlternativeExplanation}
+            <div class="compare-grid">
+              <div class="compare-col">
+                <div class="muted tiny">Chosen move</div>
+                <div>{chosenExplanation.summary}</div>
+              </div>
+              <div class="compare-col">
+                <div class="muted tiny">Best alternative</div>
+                <div>{bestAlternativeExplanation.summary}</div>
+              </div>
+            </div>
+          {/if}
         {/if}
       </div>
 
@@ -441,6 +604,9 @@
   .mini-board :global(.board-wrap) { width: min(48vmin, 360px); margin-bottom: 10px; }
   .section-title { font-size: 12px; text-transform: uppercase; letter-spacing: 0.03em; font-weight: 800; color: rgba(234,240,255,0.75); margin-bottom: 6px; }
   .pv-box { margin-bottom: 10px; }
+  .swing-box { border: 1px solid var(--stroke); border-radius: 12px; padding: 8px; margin-bottom: 10px; display: grid; gap: 6px; }
+  .swing-track { height: 9px; border-radius: 999px; background: rgba(255,255,255,0.12); overflow: hidden; }
+  .swing-fill { height: 100%; background: linear-gradient(90deg, rgba(72,187,120,0.85), rgba(242,193,78,0.95), rgba(226,85,85,0.95)); }
   .pv-line { display: flex; gap: 6px; flex-wrap: wrap; }
   .pv-chip { border: 1px solid var(--stroke); border-radius: 999px; padding: 4px 8px; font-size: 12px; }
   .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
@@ -469,6 +635,23 @@
   .b-brilliant { background: rgba(143,91,255,0.2); border: 1px solid rgba(143,91,255,0.5); }
   .stats { border: 1px solid var(--stroke); border-radius: 12px; padding: 8px; }
   .stats .row { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+  .explain-box { border: 1px solid var(--stroke); border-radius: 12px; padding: 8px; display: grid; gap: 8px; margin-bottom: 10px; }
+  .summary { font-size: 13px; line-height: 1.35; }
+  .factors { margin: 0; padding-left: 18px; display: grid; gap: 4px; font-size: 12px; }
+  .risk-row { display: flex; justify-content: space-between; align-items: center; }
+  .risk-pill { border-radius: 999px; font-size: 11px; text-transform: uppercase; padding: 2px 8px; border: 1px solid var(--stroke); }
+  .risk-low { background: rgba(72,187,120,0.18); border-color: rgba(72,187,120,0.55); }
+  .risk-medium { background: rgba(242,193,78,0.18); border-color: rgba(242,193,78,0.55); }
+  .risk-high { background: rgba(226,85,85,0.18); border-color: rgba(226,85,85,0.55); }
+  .robustness { display: grid; gap: 4px; }
+  .robustness .bar { height: 8px; border-radius: 999px; background: rgba(255,255,255,0.12); overflow: hidden; }
+  .robustness .bar .fill { height: 100%; background: linear-gradient(90deg, rgba(226,85,85,0.8), rgba(242,193,78,0.95), rgba(72,187,120,0.95)); }
+  .blunder-note { font-size: 12px; border: 1px solid rgba(226,85,85,0.5); background: rgba(226,85,85,0.12); border-radius: 8px; padding: 6px; }
+  .compare-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .compare-col { border: 1px solid var(--stroke); border-radius: 8px; padding: 6px; font-size: 12px; display: grid; gap: 4px; }
   .error { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(226,85,85,0.5); background: rgba(226,85,85,0.12); }
-  @media (max-width: 1000px) { .analysis-grid { grid-template-columns: 1fr; } }
+  @media (max-width: 1000px) {
+    .analysis-grid { grid-template-columns: 1fr; }
+    .compare-grid { grid-template-columns: 1fr; }
+  }
 </style>

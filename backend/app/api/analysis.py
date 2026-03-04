@@ -142,6 +142,15 @@ async def best_move(request: BestMoveRequest) -> dict[str, Any]:
         "principal_variation": result.principal_variation,
         "move_evaluations": result.move_evaluations,
         "move_classifications": result.move_classifications,
+        "move_explanations": {
+            key: asdict(explanation)
+            for key, explanation in result.move_explanations.items()
+        },
+        "evaluation_breakdowns": {
+            key: asdict(breakdown)
+            for key, breakdown in result.evaluation_breakdowns.items()
+        },
+        "root_evaluation": asdict(result.root_evaluation),
         "diagnostics": result.diagnostics,
     }
 

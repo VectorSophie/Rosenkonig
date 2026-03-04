@@ -1,56 +1,159 @@
 # Engine Design
 
-The game engine handles the core mechanics of Rosenkönig, including board state, move generation, and scoring.
+This document covers the competitive Rosenkonig engine, deterministic explainable-move pipeline, and analysis UI stretch features.
 
-## Board Representation
+## Core Engine Model
 
-The board is an 11x11 grid. Each cell can be empty, occupied by a Red crown, or occupied by a White crown.
+The engine state is managed by `BoardState` (`backend/app/engine/board.py`) and move legality/application by `logic.py`.
 
-```text
-    0 1 2 3 4 5 6 7 8 9 10
- 0  . . . . . . . . . . .
- 1  . . . . . . . . . . .
- 2  . . . . . . . . . . .
- 3  . . . . . . . . . . .
- 4  . . . . . . . . . . .
- 5  . . . . . K . . . . .  <-- Crown (K) starts at (5,5)
- 6  . . . . . . . . . . .
- 7  . . . . . . . . . . .
- 8  . . . . . . . . . . .
- 9  . . . . . . . . . . .
-10  . . . . . . . . . . .
+- Board is an 11x11 grid with values: `0=empty`, `1=red`, `2=white`.
+- Crown position (`king_position`) drives play targets from power cards.
+- Player resources include hand cards, hero cards, and remaining stones.
+- Move types are `play`, `draw`, and `pass`.
+
+### Scoring Rule
+
+`calculate_scores` in `logic.py` computes each player score as:
+
+1. Find orthogonally connected regions of a player color.
+2. For each region size `n`, add `n^2`.
+3. Sum all region contributions.
+
+This is the official connectivity objective and is the base term for competitive evaluation.
+
+## Competitive Search
+
+`find_best_move` in `backend/app/engine/competitive.py` uses determinization + alpha-beta.
+
+1. Enumerate legal root moves.
+2. Sample hidden-information worlds (`sample_opponent_hand`) with fixed RNG seed for determinism.
+3. For each root move and sampled world:
+   - Apply root move.
+   - Run iterative deepening alpha-beta up to configured depth.
+   - Record score and principal variation.
+4. Average scores across completed determinizations.
+5. Classify candidates (`best/good/inaccuracy/blunder/brilliant`) using numeric drop thresholds.
+
+Determinism guarantees:
+
+- Fixed `random_seed` in config.
+- No non-deterministic text generation.
+- Explanations are pure functions of measured deltas and search artifacts.
+
+## Structured Evaluation Breakdown
+
+Evaluation now returns `EvalBreakdown` instead of scalar-only output.
+
+```python
+class EvalBreakdown:
+    total: float
+    region_score_diff: float
+    expansion_score: float
+    mobility_score: float
+    crown_centrality: float
+    hero_threat_adjustment: float
+    stone_scarcity_pressure: float
 ```
 
-Internally, the board is represented as a 2D array or a flat list of 121 integers.
+All candidate moves and the root position carry these breakdowns in `EngineResult`.
 
-## Move Generation
+## Explainable Move Generation
 
-Moves are determined by the Crown's current position and the cards in a player's hand. Each card specifies a direction and a distance (1, 2, or 3).
+### Data Contract
 
-### Directions
-There are 8 possible directions:
-- N, NE, E, SE, S, SW, W, NW
+`MoveExplanation` is generated per candidate move and returned in engine/API payloads.
 
-### Validation Logic
-A move is valid if:
-1.  The target coordinates are within the 11x11 bounds.
-2.  The target cell is empty (unless a Knight card is used to flip an opponent's piece).
-3.  The player has the corresponding card in their hand.
+```python
+class MoveExplanation:
+    summary: str
+    key_factors: list[str]  # max 4
+    principal_variation: list
+    risk_level: str         # low/medium/high
+    robustness_score: float # 0..1
+```
 
-## Scoring (Connectivity)
+### Rule Sources
 
-Scoring is based on the size of contiguous groups of crowns of the same color.
+Explanations are derived from:
 
-### Calculation
-1.  Identify all connected groups of crowns (using BFS or DFS).
-2.  For each group, count the number of crowns (n).
-3.  The score for that group is n squared (n²).
-4.  The total score is the sum of all group scores.
+- Eval component deltas (`after - before`)
+- Region topology metrics (region count, largest region size, isolated groups)
+- Principal variation sequence from search
+- Variance across determinizations
 
-Example: A group of 4 crowns is worth 16 points. Two separate groups of 2 crowns are worth 4 + 4 = 8 points.
+### Rule Mapping (Deterministic)
 
-## Complexity Analysis
+- Region term increases:
+  - "Connects two regions" when own region count decreases while largest region grows.
+  - "Expands largest region" when largest component size increases.
+  - "Prevents opponent region growth" when opponent largest region drops or fragmentation rises.
+- Expansion term increase/decrease:
+  - Future expansion options improved or reduced.
+- Mobility term increase/decrease:
+  - Crown flexibility improved or crown committed to narrow lane.
+- Hero threat adjustment increase/decrease:
+  - Reduced vulnerability to hero flip or increased exposure.
+- PV explanation (depth >= 3):
+  - Emits forced-sequence statement using actual PV moves and measured region swing.
+- Robustness from variance:
+  - `robustness_score = 1 / (1 + variance)`
+  - variance <= 0.15 -> low risk
+  - 0.15 < variance <= 0.6 -> medium risk
+  - variance > 0.6 -> high risk
 
-- **Move Generation**: O(H) where H is the number of cards in hand (max 5). Very efficient.
-- **Scoring**: O(B) where B is the number of cells on the board (121). We visit each cell once during the group finding process.
-- **Memory**: O(B) to store the board state.
+### Anti-Hallucination Constraints
+
+- No generic strategy phrases without numeric driver.
+- No claims not backed by eval deltas or search/PV output.
+- Maximum 4 key factors to keep every bullet meaningful and traceable.
+
+## Engine Result and Analysis Output
+
+`EngineResult` now includes:
+
+- `move_explanations`: move-key -> `MoveExplanation`
+- `evaluation_breakdowns`: move-key -> `EvalBreakdown`
+- `root_evaluation`: `EvalBreakdown` for current state
+
+`analyze_game` now stores per-ply:
+
+- `chosen_explanation`
+- `best_move_explanation`
+- `blunder_explanation` (when applicable)
+
+This keeps post-game analysis consistent with what the search actually computed at each position.
+
+## Stretch UI Features
+
+Implemented in `frontend/src/lib/components/AnalysisPanel.svelte` and `Board.svelte`.
+
+### 1) Affected Region Highlight
+
+- Board accepts `highlightedSquares`.
+- Analysis view computes changed cells by diffing previous vs selected snapshot.
+- Highlight region expands from changed stones through orthogonal flood-fill of same-color connected cells.
+- Crown movement cells are also highlighted when crown position changes.
+
+### 2) Swing Magnitude Visualization
+
+- For selected analyzed move, UI shows:
+  - absolute score swing `abs(best_score - chosen_score)`
+  - normalized bar for quick severity reading
+
+### 3) Side-by-Side Alternative Explanation
+
+- When both explanations exist, analysis panel shows:
+  - chosen move summary
+  - best alternative summary
+
+This makes the blunder/inaccuracy cause directly comparable without leaving the current move context.
+
+## Validation
+
+Added tests in `backend/tests/test_competitive.py` for:
+
+- region-merge explanation mentioning connection
+- mobility-drop explanation mentioning reduced flexibility
+- high-variance explanation marked high risk
+
+All tests and frontend checks/build must pass before shipping.

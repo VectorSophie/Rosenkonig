@@ -61,7 +61,40 @@ class EngineResult:
     principal_variation: list[dict[str, Any]]
     move_evaluations: dict[str, float]
     move_classifications: dict[str, str]
+    move_explanations: dict[str, "MoveExplanation"]
+    evaluation_breakdowns: dict[str, "EvalBreakdown"]
+    root_evaluation: "EvalBreakdown"
     diagnostics: dict[str, Any]
+
+
+@dataclass(slots=True)
+class EvalBreakdown:
+    total: float
+    region_score_diff: float
+    expansion_score: float
+    mobility_score: float
+    crown_centrality: float
+    hero_threat_adjustment: float
+    stone_scarcity_pressure: float
+
+
+@dataclass(slots=True)
+class MoveExplanation:
+    summary: str
+    key_factors: list[str]
+    principal_variation: list[dict[str, Any]]
+    risk_level: str
+    robustness_score: float
+
+
+@dataclass(slots=True)
+class SearchContext:
+    move_key: str
+    principal_variation: list[Move]
+    search_depth: int
+    score_variance: float
+    completed_trials: int
+    determinizations: int
 
 
 @dataclass(slots=True)
@@ -74,6 +107,9 @@ class AnalysisMove:
     best_score: float
     classification: str
     best_line: list[dict[str, Any]]
+    chosen_explanation: MoveExplanation | None
+    best_move_explanation: MoveExplanation | None
+    blunder_explanation: str | None
 
 
 @dataclass(slots=True)
@@ -232,9 +268,205 @@ def _stone_scarcity_pressure(state: BoardState, player: PlayerColor) -> float:
     return (float(opp - me)) * max(0.0, late_factor)
 
 
+def _risk_from_variance(variance: float) -> tuple[str, float]:
+    robustness = 1.0 / (1.0 + max(0.0, variance))
+    if variance <= 0.15:
+        return "low", robustness
+    if variance <= 0.6:
+        return "medium", robustness
+    return "high", robustness
+
+
+def _region_groups(
+    state: BoardState, player: PlayerColor
+) -> list[set[tuple[int, int]]]:
+    target = cell_for_player(player)
+    seen: set[tuple[int, int]] = set()
+    groups: list[set[tuple[int, int]]] = []
+    for row in range(BOARD_SIZE):
+        for col in range(BOARD_SIZE):
+            origin = (row, col)
+            if origin in seen or state.grid[row][col] != target:
+                continue
+            stack = [origin]
+            component: set[tuple[int, int]] = set()
+            seen.add(origin)
+            while stack:
+                rr, cc = stack.pop()
+                component.add((rr, cc))
+                for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                    nr, nc = rr + dr, cc + dc
+                    neighbor = (nr, nc)
+                    if nr < 0 or nr >= BOARD_SIZE or nc < 0 or nc >= BOARD_SIZE:
+                        continue
+                    if neighbor in seen:
+                        continue
+                    if state.grid[nr][nc] != target:
+                        continue
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+            groups.append(component)
+    return groups
+
+
+def _region_metrics(state: BoardState, player: PlayerColor) -> dict[str, int]:
+    groups = _region_groups(state, player)
+    if not groups:
+        return {"count": 0, "largest": 0, "isolated": 0}
+    sizes = [len(group) for group in groups]
+    return {
+        "count": len(groups),
+        "largest": max(sizes),
+        "isolated": sum(1 for size in sizes if size == 1),
+    }
+
+
+def _format_move(move: Move) -> str:
+    if move.action == "draw":
+        return "Draw"
+    if move.action == "pass":
+        return "Pass"
+    suffix = "H-" if move.use_hero else ""
+    idx = "-" if move.card_index is None else str(move.card_index + 1)
+    return f"{suffix}C{idx}"
+
+
+def explain_move(
+    before_state: BoardState,
+    after_state: BoardState,
+    eval_before: EvalBreakdown,
+    eval_after: EvalBreakdown,
+    search_context: SearchContext,
+) -> MoveExplanation:
+    factors: list[str] = []
+    mover = before_state.current_player
+    opp = opponent(mover)
+
+    region_delta = eval_after.region_score_diff - eval_before.region_score_diff
+    my_before = _region_metrics(before_state, mover)
+    my_after = _region_metrics(after_state, mover)
+    opp_before = _region_metrics(before_state, opp)
+    opp_after = _region_metrics(after_state, opp)
+    if region_delta > 0.5:
+        if (
+            my_after["count"] < my_before["count"]
+            and my_after["largest"] > my_before["largest"]
+        ):
+            factors.append(
+                f"Connects two regions (own regions {my_before['count']} -> {my_after['count']}, largest {my_before['largest']} -> {my_after['largest']})."
+            )
+        elif my_after["largest"] > my_before["largest"]:
+            factors.append(
+                f"Expands largest region (size {my_before['largest']} -> {my_after['largest']}, region diff +{region_delta:.2f})."
+            )
+        elif (
+            opp_after["largest"] < opp_before["largest"]
+            or opp_after["count"] > opp_before["count"]
+        ):
+            factors.append(
+                f"Prevents opponent region growth (opponent largest {opp_before['largest']} -> {opp_after['largest']}, regions {opp_before['count']} -> {opp_after['count']})."
+            )
+        else:
+            factors.append(
+                f"Improves region score differential by +{region_delta:.2f}."
+            )
+    elif region_delta < -0.5:
+        factors.append(f"Concedes region score differential by {region_delta:.2f}.")
+
+    if opp_after["count"] > opp_before["count"]:
+        factors.append(
+            f"Splits opponent regions (count {opp_before['count']} -> {opp_after['count']})."
+        )
+    elif opp_after["isolated"] > opp_before["isolated"]:
+        factors.append(
+            f"Creates opponent isolation (single-stone regions {opp_before['isolated']} -> {opp_after['isolated']})."
+        )
+
+    expansion_delta = eval_after.expansion_score - eval_before.expansion_score
+    if expansion_delta > 0.25:
+        factors.append(
+            f"Improves future expansion options (expansion term +{expansion_delta:.2f})."
+        )
+    elif expansion_delta < -0.25:
+        factors.append(
+            f"Reduces surrounding empty-space control (expansion term {expansion_delta:.2f})."
+        )
+
+    mobility_delta = eval_after.mobility_score - eval_before.mobility_score
+    if mobility_delta > 0.25:
+        factors.append(
+            f"Increases crown flexibility (mobility term +{mobility_delta:.2f})."
+        )
+    elif mobility_delta < -0.25:
+        factors.append(
+            f"Commits crown to narrow lane (mobility term {mobility_delta:.2f})."
+        )
+
+    threat_delta = (
+        eval_after.hero_threat_adjustment - eval_before.hero_threat_adjustment
+    )
+    if threat_delta > 0.25:
+        factors.append(
+            f"Reduces vulnerability to hero flip (hero safety term +{threat_delta:.2f})."
+        )
+    elif threat_delta < -0.25:
+        factors.append(
+            f"Leaves regions exposed to hero threat (hero safety term {threat_delta:.2f})."
+        )
+
+    pv = search_context.principal_variation
+    pv_payload = [_move_to_dict(move) for move in pv]
+    if search_context.search_depth >= 3 and len(pv) >= 3:
+        sim = before_state.copy()
+        before_seq = calculate_scores(sim)
+        sequence_ok = True
+        for step in pv[:3]:
+            try:
+                sim = apply_move(sim, step)
+            except InvalidMoveError:
+                sequence_ok = False
+                break
+        if sequence_ok:
+            after_seq = calculate_scores(sim)
+            seq_region_gain = (after_seq[mover] - after_seq[opp]) - (
+                before_seq[mover] - before_seq[opp]
+            )
+            factors.append(
+                f"PV: if opponent plays {_format_move(pv[1])}, engine responds {_format_move(pv[2])} (region swing {seq_region_gain:+.2f})."
+            )
+
+    risk_level, robustness = _risk_from_variance(search_context.score_variance)
+    if risk_level == "low":
+        factors.append(
+            f"Stable across hidden-card scenarios (variance {search_context.score_variance:.3f} over {search_context.completed_trials} trials)."
+        )
+    elif risk_level == "high":
+        factors.append(
+            f"High-risk; outcome depends on hidden cards (variance {search_context.score_variance:.3f} over {search_context.completed_trials} trials)."
+        )
+    else:
+        factors.append(
+            f"Moderate hidden-information sensitivity (variance {search_context.score_variance:.3f} over {search_context.completed_trials} trials)."
+        )
+
+    trimmed = factors[:4]
+    if not trimmed:
+        trimmed = [
+            f"Net evaluation changes from {eval_before.total:.2f} to {eval_after.total:.2f} (delta {eval_after.total - eval_before.total:+.2f})."
+        ]
+    summary = " ".join(trimmed[:2])
+    return MoveExplanation(
+        summary=summary,
+        key_factors=trimmed,
+        principal_variation=pv_payload,
+        risk_level=risk_level,
+        robustness_score=round(robustness, 4),
+    )
+
+
 def evaluate_position(
     state: BoardState, player: PlayerColor, weights: dict[str, float]
-) -> float:
+) -> EvalBreakdown:
     scores = calculate_scores(state)
     region_delta = float(scores[player] - scores[opponent(player)])
     mobility_delta = _mobility(state, player) - _mobility(state, opponent(player))
@@ -242,16 +474,25 @@ def evaluate_position(
         state, opponent(player)
     )
     centrality = _crown_centrality(state, player)
-    threat = _hero_threat_exposure(state, player)
+    hero_adjustment = -_hero_threat_exposure(state, player)
     scarcity = _stone_scarcity_pressure(state, player)
 
-    return (
+    total = (
         weights["region_score"] * region_delta
         + weights["mobility"] * mobility_delta
         + weights["expansion_potential"] * expansion_delta
         + weights["crown_centrality"] * centrality
-        - weights["hero_threat_discount"] * threat
+        + weights["hero_threat_discount"] * hero_adjustment
         + weights["stone_scarcity_pressure"] * scarcity
+    )
+    return EvalBreakdown(
+        total=total,
+        region_score_diff=region_delta,
+        expansion_score=expansion_delta,
+        mobility_score=mobility_delta,
+        crown_centrality=centrality,
+        hero_threat_adjustment=hero_adjustment,
+        stone_scarcity_pressure=scarcity,
     )
 
 
@@ -285,12 +526,12 @@ def _alpha_beta(
     start_time: float,
 ) -> tuple[float, list[Move]]:
     if cfg.max_nodes is not None and node_counter["count"] >= cfg.max_nodes:
-        return evaluate_position(state, maximizing_for, weights), []
+        return evaluate_position(state, maximizing_for, weights).total, []
     if (
         cfg.time_limit_seconds is not None
         and (time.perf_counter() - start_time) >= cfg.time_limit_seconds
     ):
-        return evaluate_position(state, maximizing_for, weights), []
+        return evaluate_position(state, maximizing_for, weights).total, []
 
     node_counter["count"] += 1
 
@@ -345,7 +586,7 @@ def _alpha_beta(
                         break
                 if best_line_q:
                     return best_q, best_line_q
-        return evaluate_position(state, maximizing_for, weights), []
+        return evaluate_position(state, maximizing_for, weights).total, []
 
     key = _state_hash(state, maximizing_for)
     if transposition is not None and key in transposition:
@@ -440,6 +681,10 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
     root_moves = [entry.move for entry in legal_entries]
     move_scores: dict[str, float] = {}
     pv_by_move: dict[str, list[Move]] = {}
+    move_variances: dict[str, float] = {}
+    evaluation_breakdowns: dict[str, EvalBreakdown] = {}
+    move_after_states: dict[str, BoardState] = {}
+    root_evaluation = evaluate_position(state, state.current_player, weights)
 
     if not root_moves:
         return EngineResult(
@@ -448,6 +693,9 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
             principal_variation=[],
             move_evaluations={},
             move_classifications={},
+            move_explanations={},
+            evaluation_breakdowns={},
+            root_evaluation=root_evaluation,
             diagnostics={"nodes": 0, "elapsed_ms": 0, "determinizations": 0},
         )
 
@@ -466,6 +714,15 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
         acc = 0.0
         line_acc: list[Move] = []
         completed_trials = 0
+        trial_scores: list[float] = []
+        try:
+            after_state = apply_move(state.copy(), move)
+            move_after_states[key] = after_state
+            evaluation_breakdowns[key] = evaluate_position(
+                after_state, state.current_player, weights
+            )
+        except InvalidMoveError:
+            evaluation_breakdowns[key] = root_evaluation
         for sampled_world in sampled_worlds:
             sampled = sampled_world.copy()
             try:
@@ -506,7 +763,9 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
                 ):
                     break
 
-            acc += _risk_adjust(best_local_score, config)
+            adjusted_score = _risk_adjust(best_local_score, config)
+            acc += adjusted_score
+            trial_scores.append(adjusted_score)
             completed_trials += 1
             if len(best_local_line) > len(line_acc):
                 line_acc = best_local_line
@@ -519,8 +778,13 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
         completed_trials_by_move[key] = completed_trials
         if completed_trials == 0:
             move_scores[key] = float("-inf")
+            move_variances[key] = 0.0
         else:
-            move_scores[key] = acc / float(completed_trials)
+            mean_score = acc / float(completed_trials)
+            move_scores[key] = mean_score
+            move_variances[key] = sum(
+                (score - mean_score) * (score - mean_score) for score in trial_scores
+            ) / float(completed_trials)
         pv_by_move[key] = [move] + line_acc
 
     best_key = max(move_scores.items(), key=lambda item: item[1])[0]
@@ -531,6 +795,29 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
         blunder_drop=1.5,
         inaccuracy_drop=0.6,
     )
+    move_explanations: dict[str, MoveExplanation] = {}
+    for move in root_moves:
+        key = _move_key(move)
+        after_state = move_after_states.get(key)
+        if after_state is None:
+            continue
+        eval_after = evaluation_breakdowns.get(key)
+        if eval_after is None:
+            continue
+        move_explanations[key] = explain_move(
+            state,
+            after_state,
+            root_evaluation,
+            eval_after,
+            SearchContext(
+                move_key=key,
+                principal_variation=pv_by_move.get(key, [move]),
+                search_depth=config.search_depth,
+                score_variance=move_variances.get(key, 0.0),
+                completed_trials=completed_trials_by_move.get(key, 0),
+                determinizations=len(sampled_worlds),
+            ),
+        )
     pv = [_move_to_dict(move) for move in pv_by_move.get(best_key, [best_move])]
 
     elapsed_ms = int((time.perf_counter() - start) * 1000)
@@ -540,11 +827,15 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
         principal_variation=pv,
         move_evaluations={k: float(v) for k, v in move_scores.items()},
         move_classifications=move_classifications,
+        move_explanations=move_explanations,
+        evaluation_breakdowns=evaluation_breakdowns,
+        root_evaluation=root_evaluation,
         diagnostics={
             "nodes": total_nodes,
             "elapsed_ms": elapsed_ms,
             "determinizations": len(sampled_worlds),
             "completed_trials_by_move": completed_trials_by_move,
+            "variance_by_move": move_variances,
             "depth": config.search_depth,
             "risk_profile": config.risk_profile,
         },
@@ -626,7 +917,28 @@ def analyze_game(
             best_score=best_eval,
             classification=label,
             best_line=result.principal_variation,
+            chosen_explanation=result.move_explanations.get(chosen_key),
+            best_move_explanation=result.move_explanations.get(best_key)
+            if best_key is not None
+            else None,
+            blunder_explanation=None,
         )
+        if (
+            move_record.classification == "blunder"
+            and move_record.best_move_explanation is not None
+        ):
+            best_reason = (
+                move_record.best_move_explanation.key_factors[0]
+                if move_record.best_move_explanation.key_factors
+                else move_record.best_move_explanation.summary
+            )
+            chosen_reason = (
+                move_record.chosen_explanation.key_factors[0]
+                if move_record.chosen_explanation is not None
+                and move_record.chosen_explanation.key_factors
+                else "Chosen move underperformed on measured factors"
+            )
+            move_record.blunder_explanation = f"Score drop {drop:.2f} vs best move. Chosen: {chosen_reason} Best: {best_reason}"
         moves.append(move_record)
         alternatives.append(result.principal_variation)
         timeline.append(chosen_eval)

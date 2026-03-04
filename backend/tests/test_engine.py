@@ -87,12 +87,20 @@ def test_pass_only_legal_when_no_draw_or_play_exists() -> None:
     assert legal[0].move.action == "pass"
 
 
-def test_game_ends_after_two_consecutive_passes() -> None:
+def test_game_ends_on_full_hand_deadlock_for_both_players() -> None:
     state = create_initial_state(shuffled_deck=[])
     state.players[PlayerColor.RED].power_cards = [
         PowerCard(direction=Direction.N, distance=1),
+        PowerCard(direction=Direction.N, distance=1),
+        PowerCard(direction=Direction.N, distance=1),
+        PowerCard(direction=Direction.N, distance=1),
+        PowerCard(direction=Direction.N, distance=1),
     ]
     state.players[PlayerColor.WHITE].power_cards = [
+        PowerCard(direction=Direction.N, distance=1),
+        PowerCard(direction=Direction.N, distance=1),
+        PowerCard(direction=Direction.N, distance=1),
+        PowerCard(direction=Direction.N, distance=1),
         PowerCard(direction=Direction.N, distance=1),
     ]
     state.players[PlayerColor.RED].hero_cards = 0
@@ -100,8 +108,21 @@ def test_game_ends_after_two_consecutive_passes() -> None:
     state.king_position = (0, 0)
 
     after_red_pass = apply_move(state, Move(action="pass"))
-    after_white_pass = apply_move(after_red_pass, Move(action="pass"))
-    assert after_white_pass.game_over is True
+    assert after_red_pass.game_over is True
+
+
+def test_draw_reshuffles_discard_when_draw_pile_is_empty() -> None:
+    state = create_initial_state(shuffled_deck=[])
+    state.players[PlayerColor.RED].power_cards = [
+        PowerCard(direction=Direction.E, distance=1),
+    ]
+    state.discard_pile = [PowerCard(direction=Direction.S, distance=2)]
+
+    next_state = apply_move(state, Move(action="draw"))
+
+    assert len(next_state.players[PlayerColor.RED].power_cards) == 2
+    assert len(next_state.draw_pile) == 0
+    assert len(next_state.discard_pile) == 0
 
 
 def test_calculate_scores_sums_square_of_connected_group_sizes() -> None:

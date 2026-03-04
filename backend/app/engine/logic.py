@@ -60,9 +60,18 @@ def compute_target_position(
 def can_draw(state: BoardState, player: PlayerColor) -> bool:
     # Source: https://www.thamesandkosmos.com/manuals/full/691790_theroseking_manual.pdf
     # "Draw a power card ... This is only possible if the player has fewer than five cards."
-    # Implementation: Drawing is legal only when hand size is below 5 and draw pile is non-empty.
     hand = state.players[player].power_cards
-    return len(hand) < MAX_HAND_SIZE and bool(state.draw_pile)
+    return len(hand) < MAX_HAND_SIZE and bool(state.draw_pile or state.discard_pile)
+
+
+def _reshuffle_discard_into_draw(state: BoardState) -> None:
+    if state.draw_pile:
+        return
+    if not state.discard_pile:
+        return
+
+    state.draw_pile = state.discard_pile.copy()
+    state.discard_pile.clear()
 
 
 def _validate_play_move(
@@ -254,6 +263,9 @@ def _apply_play(next_state: BoardState, move: Move, active_player: PlayerColor) 
 
 
 def _apply_draw(next_state: BoardState, active_player: PlayerColor) -> None:
+    _reshuffle_discard_into_draw(next_state)
+    if not next_state.draw_pile:
+        raise InvalidMoveError("draw pile is empty")
     card = next_state.draw_pile.pop()
     next_state.players[active_player].power_cards.append(card)
     next_state.consecutive_passes = 0
@@ -268,14 +280,22 @@ def _update_game_over(next_state: BoardState) -> None:
         POWER_STONES_PER_PLAYER - next_state.players[color].stones_remaining
         for color in PlayerColor
     )
-    # Source: https://www.thamesandkosmos.com/manuals/full/691790_theroseking_manual.pdf
-    # "The game ends when: All 52 power tokens have been placed OR neither player can make a move."
-    # Implementation: End game at 52 placements, or after both players are forced to pass consecutively.
     if stones_used >= 52:
         next_state.game_over = True
         return
-    if next_state.consecutive_passes >= 2:
+    if _is_full_hand_deadlock(next_state):
         next_state.game_over = True
+
+
+def _is_full_hand_deadlock(state: BoardState) -> bool:
+    for color in PlayerColor:
+        if len(state.players[color].power_cards) < MAX_HAND_SIZE:
+            return False
+        probe = state.copy()
+        probe.current_player = color
+        if _has_any_play_move(probe, color):
+            return False
+    return True
 
 
 def apply_move(state: BoardState, move: Move) -> BoardState:

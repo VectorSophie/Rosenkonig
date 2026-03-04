@@ -6,6 +6,7 @@
   export let crownPos: [number, number] = [5, 5];
   export let previewPos: [number, number] | null = null;
   export let legalMoves: LegalMove[] = [];
+  export let highlightedSquares: Array<[number, number]> = [];
   export let selectedCardIndex: number | null = null;
   export let selectedUseHero = false;
   export let interactive = true;
@@ -37,6 +38,8 @@
   function keyOf(r: number, c: number) {
     return `${r},${c}`;
   }
+
+  $: highlightedKeys = new Set(highlightedSquares.map(([r, c]) => keyOf(r, c)));
 
   $: selectedMove =
     selectedCardIndex === null
@@ -86,10 +89,18 @@
         {@const anyLegal = isAnyLegalTarget(r, c)}
         {@const selected = selectedTargetKey === keyOf(r, c)}
         {@const selectable = isSelectableTarget(r, c)}
+        {@const highlighted = highlightedKeys.has(keyOf(r, c))}
 
         <button
           type="button"
-          class={['cell', dark ? 'dark' : 'light', anyLegal ? 'legal' : '', selected ? 'selected' : '', selectable ? 'selectable' : ''].join(' ')}
+          class={[
+            'cell',
+            dark ? 'dark' : 'light',
+            anyLegal ? 'legal' : '',
+            selected ? 'selected' : '',
+            selectable ? 'selectable' : '',
+            highlighted ? 'impact' : ''
+          ].join(' ')}
           on:click={() => onCellClick(r, c)}
           aria-label={`cell ${r},${c}`}
         >
@@ -164,6 +175,12 @@
     box-shadow:
       inset 0 0 0 2px rgba(242, 193, 78, 0.85),
       inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+  }
+
+  .cell.impact {
+    box-shadow:
+      inset 0 0 0 2px rgba(76, 128, 255, 0.72),
+      inset 0 0 0 4px rgba(76, 128, 255, 0.18);
   }
 
   .cell.selectable:hover {
