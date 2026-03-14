@@ -29,6 +29,7 @@ class EngineConfigPayload(BaseModel):
     random_seed: int = 7
     eval_weights: dict[str, float] = Field(default_factory=dict)
     risk_profile: str = Field(default="balanced")
+    assume_known_opponent_hand: bool = False
 
 
 class BestMoveRequest(BaseModel):
@@ -59,6 +60,7 @@ def _to_engine_config(payload: EngineConfigPayload | None) -> EngineConfig:
         random_seed=source.random_seed,
         eval_weights=source.eval_weights,
         risk_profile=source.risk_profile,
+        assume_known_opponent_hand=source.assume_known_opponent_hand,
     )
 
 

@@ -46,6 +46,7 @@ class EngineConfig:
     random_seed: int = 7
     eval_weights: dict[str, float] | None = None
     risk_profile: str = "balanced"
+    assume_known_opponent_hand: bool = False
 
     def resolved_weights(self) -> dict[str, float]:
         weights = dict(DEFAULT_EVAL_WEIGHTS)
@@ -700,12 +701,15 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
         )
 
     sampled_worlds: list[BoardState] = []
-    trials = max(1, config.num_determinizations)
-    for _ in range(trials):
-        if config.time_limit_seconds is not None:
-            if (time.perf_counter() - start) >= config.time_limit_seconds:
-                break
-        sampled_worlds.append(sample_opponent_hand(state, rng=rng))
+    if config.assume_known_opponent_hand:
+        sampled_worlds.append(state.copy())
+    else:
+        trials = max(1, config.num_determinizations)
+        for _ in range(trials):
+            if config.time_limit_seconds is not None:
+                if (time.perf_counter() - start) >= config.time_limit_seconds:
+                    break
+            sampled_worlds.append(sample_opponent_hand(state, rng=rng))
 
     total_nodes = 0
     completed_trials_by_move: dict[str, int] = {}
@@ -838,6 +842,7 @@ def find_best_move(state: BoardState, config: EngineConfig) -> EngineResult:
             "variance_by_move": move_variances,
             "depth": config.search_depth,
             "risk_profile": config.risk_profile,
+            "assume_known_opponent_hand": config.assume_known_opponent_hand,
         },
     )
 

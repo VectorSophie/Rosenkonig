@@ -11,13 +11,19 @@
 <main class="analyze-shell">
   <header class="top">
     <h1>Game Analysis</h1>
-    <a class="btn ghost" href="/">Back to game</a>
+    <div class="actions">
+      <a class="btn ghost" href="/analyze/freeform">Position lab</a>
+      <a class="btn ghost" href="/">Back to game</a>
+    </div>
   </header>
 
   {#if roomId}
     <AnalysisPanel roomId={roomId} state={state} stateHistory={stateHistory} />
   {:else}
-    <div class="empty">Open analysis from a finished game or use `/analyze/&lt;roomId&gt;`.</div>
+    <div class="empty">
+      Open analysis from a finished game or use `/analyze/&lt;roomId&gt;`.
+      You can also use <a href="/analyze/freeform">Position Lab</a> for custom setups.
+    </div>
   {/if}
 </main>
 
@@ -35,6 +41,12 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+  }
+
+  .actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   h1 {

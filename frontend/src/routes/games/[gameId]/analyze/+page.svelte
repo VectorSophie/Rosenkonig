@@ -11,7 +11,10 @@
 <main class="analyze-shell">
   <header class="top">
     <h1>Game Analysis</h1>
-    <a class="btn ghost" href={`/games/${encodeURIComponent(roomId)}`}>Back to game</a>
+    <div class="actions">
+      <a class="btn ghost" href="/analyze/freeform">Position lab</a>
+      <a class="btn ghost" href={`/games/${encodeURIComponent(roomId)}`}>Back to game</a>
+    </div>
   </header>
 
   <AnalysisPanel roomId={roomId} state={state} stateHistory={stateHistory} />
@@ -31,6 +34,12 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+  }
+
+  .actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   h1 {

@@ -164,3 +164,30 @@ def test_high_variance_move_is_marked_high_risk() -> None:
     )
 
     assert explanation.risk_level == "high"
+
+
+def test_assume_known_opponent_hand_uses_single_world() -> None:
+    state = create_initial_state(
+        red_power_cards=[
+            PowerCard(direction=Direction.E, distance=1),
+            PowerCard(direction=Direction.N, distance=2),
+        ],
+        white_power_cards=[
+            PowerCard(direction=Direction.W, distance=1),
+            PowerCard(direction=Direction.S, distance=3),
+        ],
+        shuffled_deck=[],
+    )
+
+    result = find_best_move(
+        state,
+        EngineConfig(
+            search_depth=2,
+            num_determinizations=25,
+            assume_known_opponent_hand=True,
+        ),
+    )
+
+    assert result.best_move is not None
+    assert result.diagnostics["determinizations"] == 1
+    assert result.diagnostics["assume_known_opponent_hand"] is True

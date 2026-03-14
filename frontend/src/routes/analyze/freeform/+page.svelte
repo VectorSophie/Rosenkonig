@@ -1,28 +1,22 @@
 <script lang="ts">
-  import { page } from '$app/stores';
-  import AnalysisPanel from '$lib/components/AnalysisPanel.svelte';
-  import { game } from '$lib/stores/game';
-
-  $: roomId = $page.params.room;
-  $: state = $game.state;
-  $: stateHistory = $game.state_history;
+  import PositionAnalyzer from '$lib/components/PositionAnalyzer.svelte';
 </script>
 
 <main class="analyze-shell">
   <header class="top">
-    <h1>Game Analysis</h1>
+    <h1>Position Lab</h1>
     <div class="actions">
-      <a class="btn ghost" href="/analyze/freeform">Position lab</a>
+      <a class="btn ghost" href="/analyze">Game analysis</a>
       <a class="btn ghost" href="/">Back to game</a>
     </div>
   </header>
 
-  <AnalysisPanel roomId={roomId} state={state} stateHistory={stateHistory} />
+  <PositionAnalyzer />
 </main>
 
 <style>
   .analyze-shell {
-    width: min(1200px, 96vw);
+    width: min(1240px, 96vw);
     margin: 0 auto;
     padding: 20px 0 28px;
     display: grid;
@@ -34,6 +28,7 @@
     align-items: center;
     justify-content: space-between;
     gap: 10px;
+    flex-wrap: wrap;
   }
 
   .actions {
